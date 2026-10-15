@@ -1,0 +1,27 @@
+Loquor
+Copyright (c) 2026 Emad Daghreri. Licensed under the MIT License (see LICENSE).
+
+Loquor includes or downloads the following third-party work.
+
+------------------------------------------------------------------------------
+FluidAudio 0.17.7
+https://github.com/FluidInference/FluidAudio
+Copyright FluidInference. Licensed under the Apache License, Version 2.0.
+Compiled into the Loquor app. Full license text: licenses/FluidAudio-LICENSE.txt
+(also inside the app at Loquor.app/Contents/Resources/licenses/).
+
+------------------------------------------------------------------------------
+Parakeet TDT 0.6B v2 (speech recognition model)
+Created by NVIDIA. https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+Changes: converted to Core ML by FluidInference
+(https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml,
+commit ee09c569f73759e6d44c9bd16766f477b2b36d39), also CC BY 4.0.
+Loquor uses these files unmodified. The standard Loquor download fetches them
+from Hugging Face on first launch; the "offline" download includes them inside
+the app.
+
+------------------------------------------------------------------------------
+App icon: drawn by scripts/make-icon.swift (part of Loquor, MIT).

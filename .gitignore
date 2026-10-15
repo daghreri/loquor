@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+build/
+xcuserdata/
+*.xcuserstate
+# Speech models are downloaded or bundled at build time, never committed
+*.mlmodelc/
+*.p8
+*.p12

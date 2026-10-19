@@ -35,6 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let shortcuts = ShortcutStore()
     private let cleanup = CleanupSettings()
     private let connectivity = Connectivity()
+    private let arabic = ArabicSupport()
+    private let keyboard = KeyboardLayout()
+    private var languageWatch: AnyCancellable?
     private var shortcutWatch: AnyCancellable?
     private let recorder = Recorder()
     private let pill = Pill()
@@ -82,6 +85,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         pill.limitSeconds = Self.maxSeconds
         keys.onAction = { [weak self] action in self?.handle(action) }
+        arabic.onLog = { [log] line in log.write(line) }
+        arabic.start()
+        // While listening, the indicator follows a keyboard-layout switch.
+        languageWatch = keyboard.$language.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.showLanguage() }
+        }
         shortcutWatch = shortcuts.$shortcut.sink { [weak self] shortcut in self?.keys.shortcut = shortcut }
         keys.start()
         loadModel()
@@ -111,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Optional Claude cleanup. Any failure returns the raw transcript, so
     /// dictation is never lost. Only timings and reasons are logged, never text.
-    private func cleanedUp(_ text: String, app: String?) async -> String {
+    private func cleanedUp(_ text: String, app: String?, language: DictationLanguage) async -> String {
         guard cleanup.active, Cleanup.shouldClean(text) else { return text }
         // Never prompt mid-dictation: if macOS would ask, type as heard and point to Settings.
         guard let key = Keychain.loadSilently() else {
@@ -127,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pill.show(.cleaning)
         let started = ContinuousClock.now
         let model = cleanup.model
-        let outcome = await Cleaner.clean(text, app: app, words: cleanup.words, model: model, key: key)
+        let outcome = await Cleaner.clean(text, app: app, words: cleanup.words, model: model, key: key, language: language)
         let seconds = (ContinuousClock.now - started).seconds
         switch outcome {
         case .cleaned(let clean):
@@ -141,6 +150,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// English, or Arabic when Arabic is on and an Arabic keyboard layout is active.
+    private var currentLanguage: DictationLanguage {
+        DictationLanguage.choose(arabicEnabled: arabic.enabled, keyboard: keyboard.language)
+    }
+
+    /// The indicator names the language only when there's a choice (Arabic on).
+    private func showLanguage() {
+        pill.setLanguage(arabic.enabled ? currentLanguage.label : nil)
+    }
+
     private func handle(_ action: KeyGesture.Action) {
         switch action {
         case .start:
@@ -149,6 +168,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try recorder.start()
                 job += 1
                 state = .recording
+                keyboard.refresh()
+                showLanguage()
                 pill.show(.listening(handsFree: false))
                 let timer = Timer(timeInterval: Self.maxSeconds, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated { self?.keys.timeout() }
@@ -174,7 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // The app the text goes to, for the cleanup's tone.
             let app = NSWorkspace.shared.frontmostApplication?.localizedName
-            process(audio, app: app, released: released)
+            // The language is decided now, so switching layouts mid-sentence fixes a mistake.
+            keyboard.refresh()
+            process(audio, app: app, released: released, language: currentLanguage)
         case .cancel:
             capTimer?.invalidate()
             recorder.cancel()
@@ -187,10 +210,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Transcribe, optionally clean up, paste. If transcription fails the audio is
     /// kept for "Retry Last Dictation", so nothing said is lost.
-    private func process(_ audio: Recorder.Audio, app: String?, released: ContinuousClock.Instant) {
+    private func process(_ audio: Recorder.Audio, app: String?, released: ContinuousClock.Instant,
+                         language: DictationLanguage) {
         let mine = job
+        if language == .arabic && !arabic.ready {
+            // Keep the audio: it can be retried once the Arabic model is ready.
+            failedAudio = audio
+            log.write("arabic dictation kept: model \(arabic.status)")
+            pill.flash("Arabic isn't ready yet. Retry from the menu.", seconds: 4)
+            state = .idle
+            return
+        }
         state = .processing
-        if modelStatus == .ready {
+        if language == .arabic || modelStatus == .ready {
             pill.show(.transcribing)
         } else {
             pill.show(.message("Speech model is still loading…"))
@@ -203,19 +235,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             do {
-                let text = try await transcriber.transcribe(audio)
+                let text = language == .arabic
+                    ? try await arabic.transcriber.transcribe(audio)
+                    : try await transcriber.transcribe(audio)
                 let transcribed = ContinuousClock.now
                 failedAudio = nil
-                if modelStatus != .ready { modelStatus = .ready }
+                if language == .english, modelStatus != .ready { modelStatus = .ready }
                 guard !text.isEmpty else {
                     log.write(String(format: "audio=%.1fs empty", audio.seconds))
                     return
                 }
-                let typed = await cleanedUp(text, app: app)
+                let typed = await cleanedUp(text, app: app, language: language)
                 lastText = typed
                 // Trailing space so back-to-back dictations don't run together.
                 Paster.paste(typed + " ")
-                log.write(String(format: "audio=%.1fs words=%d", audio.seconds, text.split(separator: " ").count)
+                log.write(String(format: "%@ audio=%.1fs words=%d", language.rawValue, audio.seconds, text.split(separator: " ").count)
                           + " release->text=\(transcribed - released) release->typed=\(ContinuousClock.now - released)")
             } catch {
                 failedAudio = audio
@@ -316,14 +350,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let audio = failedAudio else { return }
         if case .failed = modelStatus { loadModel() }
         job += 1
-        process(audio, app: NSWorkspace.shared.frontmostApplication?.localizedName, released: .now)
+        keyboard.refresh()
+        if currentLanguage == .arabic, case .failed = arabic.status { arabic.retry() }
+        process(audio, app: NSWorkspace.shared.frontmostApplication?.localizedName, released: .now, language: currentLanguage)
     }
     @objc private func toggleLogin() { loginItem.toggle() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, keys: keys)
+            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, arabic: arabic, keys: keys)
             let host = NSHostingController(rootView: view)
             host.sizingOptions = [.preferredContentSize]  // window follows each tab's height
             let window = NSWindow(contentViewController: host)

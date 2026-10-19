@@ -27,8 +27,21 @@ public enum Cleanup {
         - If the text is already clean, return it unchanged.
         """
 
-    public static func systemPrompt(words: [String]) -> String {
+    /// Extra rules for Arabic dictations: the speech model writes no punctuation,
+    /// uses ه for ة, and spells English words in Arabic letters.
+    static let arabicRules = """
+
+        The transcript is Arabic, often Saudi dialect, sometimes with English words mixed in.
+        - Keep the dialect exactly as spoken. Do not convert it to Modern Standard Arabic.
+        - Add Arabic punctuation (، ؟ .) where it belongs.
+        - Fix spelling the recogniser simplified: ة where the word needs it instead of ه, and hamza forms (أ إ ؤ ئ) where standard.
+        - English words spoken inside Arabic may appear in Arabic letters (for example الانفوس, الكستمر): write them in English (the invoice, the customer), keeping any Arabic article or prefix as written in Arabic, like الـ invoice or للـ customer.
+        - Write numbers the way they were said.
+        """
+
+    public static func systemPrompt(words: [String], language: DictationLanguage = .english) -> String {
         var prompt = basePrompt
+        if language == .arabic { prompt += arabicRules }
         let words = words.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if !words.isEmpty {
             prompt += "\n\nThe speaker often uses these words. When a word or phrase in the transcript sounds like one of them, it almost certainly is that word: write it exactly as spelled here. "
@@ -102,7 +115,7 @@ public enum Cleanup {
     }
 
     public static func requestBody(transcript: String, app: String?, words: [String],
-                                   model: String = defaultModel) -> [String: Any] {
+                                   model: String = defaultModel, language: DictationLanguage = .english) -> [String: Any] {
         let profile = ModelProfile.of(model)
         var body: [String: Any] = [
             "model": model,
@@ -110,7 +123,7 @@ public enum Cleanup {
             // toward max_tokens, so leave room for it.
             "max_tokens": profile.thinking == nil && profile.effort || profile.thinking == "adaptive"
                 ? 4096 : max(256, transcript.count),
-            "system": systemPrompt(words: words),
+            "system": systemPrompt(words: words, language: language),
             "messages": [["role": "user", "content": userMessage(transcript: transcript, app: app)]],
         ]
         if let thinking = profile.thinking { body["thinking"] = ["type": thinking] }

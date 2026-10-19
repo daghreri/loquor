@@ -38,7 +38,8 @@ enum Cleaner {
     }
 
     /// Past the model's timeout the raw transcript is typed: dictation is never held up for long.
-    static func clean(_ transcript: String, app: String?, words: [String], model: String, key: String) async -> Cleanup.Outcome {
+    static func clean(_ transcript: String, app: String?, words: [String], model: String, key: String,
+                      language: DictationLanguage = .english) async -> Cleanup.Outcome {
         let timeout = Cleanup.ModelProfile.of(model).timeout
         var request = request(Cleanup.endpoint, key: key)
         request.httpMethod = "POST"
@@ -46,7 +47,7 @@ enum Cleaner {
         if let beta = Cleanup.betaHeader(model: model) { request.setValue(beta, forHTTPHeaderField: "anthropic-beta") }
         do {
             request.httpBody = try JSONSerialization.data(
-                withJSONObject: Cleanup.requestBody(transcript: transcript, app: app, words: words, model: model))
+                withJSONObject: Cleanup.requestBody(transcript: transcript, app: app, words: words, model: model, language: language))
             let sending = request
             let (data, response) = try await withDeadline(timeout) { try await session.data(for: sending) }
             return Cleanup.parse(status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: data)

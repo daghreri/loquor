@@ -139,17 +139,20 @@ final class ArabicSupport: ObservableObject {
         try Self.revision.write(to: Self.folder.appending(path: Self.marker), atomically: true, encoding: .utf8)
     }
 
-    /// Downloads to a temporary file, reporting bytes written.
+    /// Downloads to a temporary file, reporting bytes written. A classic download
+    /// task (not the async API, which doesn't deliver progress callbacks).
     nonisolated private static func fetch(_ url: URL, progress: @escaping @Sendable (Int64) -> Void) async throws -> URL {
-        let reporter = DownloadProgress(progress)
-        let session = URLSession(configuration: .default, delegate: reporter, delegateQueue: nil)
+        let box = DownloadDelegate(progress: progress)
+        let session = URLSession(configuration: .default, delegate: box, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let (location, response) = try await session.download(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        // The system deletes `location` when this returns; keep our own copy.
-        let tmp = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
-        try FileManager.default.moveItem(at: location, to: tmp)
-        return tmp
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                box.continuation = continuation
+                session.downloadTask(with: url).resume()
+            }
+        } onCancel: {
+            session.invalidateAndCancel()
+        }
     }
 
     nonisolated private static func sha256(of url: URL) throws -> String {
@@ -161,17 +164,41 @@ final class ArabicSupport: ObservableObject {
     }
 }
 
-/// Reports bytes written by a download task.
-private final class DownloadProgress: NSObject, URLSessionDownloadDelegate, Sendable {
-    private let report: @Sendable (Int64) -> Void
-    init(_ report: @escaping @Sendable (Int64) -> Void) { self.report = report }
+/// Reports progress for one download and hands back the finished file.
+private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let progress: @Sendable (Int64) -> Void
+    private let lock = NSLock()
+    private var file: URL?
+    var continuation: CheckedContinuation<URL, Error>?
+
+    init(progress: @escaping @Sendable (Int64) -> Void) { self.progress = progress }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        report(totalBytesWritten)
+        progress(totalBytesWritten)
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // `location` is deleted when this returns: move it somewhere of our own.
+        let tmp = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 200, (try? FileManager.default.moveItem(at: location, to: tmp)) != nil {
+            lock.withLock { file = tmp }
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let result: Result<URL, Error> = lock.withLock {
+            if let error { return .failure(error) }
+            if let file { return .success(file) }
+            return .failure(URLError(.badServerResponse))
+        }
+        let continuation = lock.withLock { () -> CheckedContinuation<URL, Error>? in
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume(with: result)
+    }
 }
 
 /// Runs Cohere Transcribe for Arabic dictations.

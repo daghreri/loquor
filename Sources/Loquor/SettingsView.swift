@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject var shortcuts: ShortcutStore
     @ObservedObject var cleanup: CleanupSettings
     @ObservedObject var connectivity: Connectivity
+    @ObservedObject var arabic: ArabicSupport
     let keys: KeyMonitor
 
     // macOS doesn't announce permission changes, so poll while the window is open.
@@ -17,6 +18,7 @@ struct SettingsView: View {
         TabView {
             Form {
                 ShortcutSection(store: shortcuts, keys: keys)
+                LanguagesSection(arabic: arabic)
                 PermissionsSection(permissions: permissions)
                 Section {
                     Toggle("Start at login", isOn: Binding(get: { loginItem.isEnabled }, set: { loginItem.set($0) }))
@@ -35,7 +37,7 @@ struct SettingsView: View {
             .tabItem { Label("Cleanup", systemImage: "sparkles") }
 
             Form {
-                AboutSection()
+                AboutSection(arabicDownloaded: arabic.isDownloaded)
             }
             .formStyle(.grouped)
             .tabItem { Label("About", systemImage: "info.circle") }
@@ -215,6 +217,64 @@ private struct IssueList: View {
     }
 }
 
+// MARK: - Languages
+
+/// English is always on. Arabic is opt-in: when off, Loquor ignores the keyboard
+/// layout entirely; when on, an Arabic layout means an Arabic dictation.
+private struct LanguagesSection: View {
+    @ObservedObject var arabic: ArabicSupport
+
+    var body: some View {
+        Section {
+            LabeledContent("English") {
+                Text("Always on").foregroundStyle(.secondary)
+            }
+            Toggle(isOn: $arabic.enabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Arabic · عربي")
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if case .downloading(let fraction) = arabic.status {
+                ProgressView(value: fraction) {
+                    Text("Downloading the Arabic model… \(Int(fraction * 100))%").font(.caption)
+                }
+            }
+            if case .failed(let message) = arabic.status {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Retry", action: arabic.retry).controlSize(.small)
+                }
+            }
+            if !arabic.enabled && arabic.isDownloaded {
+                HStack {
+                    Text("The Arabic model is downloaded (about 2.2 GB).").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Remove", action: arabic.remove).controlSize(.small)
+                }
+            }
+        } header: {
+            Text("Languages")
+        } footer: {
+            Text("With Arabic on, the keyboard layout picks the language: switch layouts (⌃Space or 🌐) to change it, even mid-sentence.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var detail: String {
+        switch arabic.status {
+        case .notDownloaded: "Off. Turning it on downloads the Arabic model (about 2.2 GB) once."
+        case .downloaded: "Off: Loquor ignores the keyboard layout and dictates in English."
+        case .downloading: "Downloading…"
+        case .loading: "Loading the Arabic model…"
+        case .ready: "On: an Arabic keyboard layout means Arabic; any other layout means English."
+        case .failed: "The Arabic model couldn't be loaded."
+        }
+    }
+}
+
 // MARK: - Cleanup
 
 private struct CleanupSection: View {
@@ -358,12 +418,19 @@ private struct PermissionRow: View {
 
 /// What Loquor is built from, so people know what runs on their Mac and what doesn't.
 private struct AboutSection: View {
+    var arabicDownloaded = false
+
     private static var modelFolder: URL { ModelStore.location }
 
     var body: some View {
         Section("About") {
             LabeledContent("Speech model") {
                 AboutValue("NVIDIA Parakeet TDT 0.6B v2", "English · runs on this Mac · CC BY 4.0, by NVIDIA")
+            }
+            if arabicDownloaded {
+                LabeledContent("Arabic model") {
+                    AboutValue("Cohere Transcribe 03-2026", "Runs on this Mac (Neural Engine) · Apache 2.0, by Cohere")
+                }
             }
             LabeledContent("Engine") {
                 AboutValue("FluidAudio 0.17.7", "Core ML on the Apple Neural Engine · Apache 2.0")

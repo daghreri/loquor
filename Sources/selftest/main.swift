@@ -197,5 +197,21 @@ do {
     check(models.count == 1 && models[0].name == "Claude Haiku 5.5", "models list parsed and filtered")
 }
 
+// Languages
+do {
+    check(DictationLanguage.forKeyboard(languages: ["ar"]) == .arabic, "Arabic layout -> Arabic")
+    check(DictationLanguage.forKeyboard(languages: ["en", "af"]) == .english, "ABC layout -> English")
+    check(DictationLanguage.forKeyboard(languages: ["fr"]) == .english, "other layouts -> English")
+    check(DictationLanguage.forKeyboard(languages: []) == .english, "no languages -> English")
+    check(DictationLanguage.choose(arabicEnabled: false, keyboard: .arabic) == .english, "Arabic off ignores the layout")
+    check(DictationLanguage.choose(arabicEnabled: true, keyboard: .arabic) == .arabic, "Arabic on follows the layout")
+    check(DictationLanguage.arabic.label == "عربي" && DictationLanguage.english.label == "English", "pill labels")
+    let ar = Cleanup.systemPrompt(words: [], language: .arabic)
+    check(ar.contains("Do not convert it to Modern Standard Arabic") && ar.contains("الـ invoice"), "Arabic cleanup rules")
+    check(!Cleanup.systemPrompt(words: []).contains("Saudi"), "English prompt unchanged")
+    let body = Cleanup.requestBody(transcript: "ابعث الانفوس للكستمر بكره", app: nil, words: [], language: .arabic)
+    check((body["system"] as? String)?.contains("Saudi") == true, "request uses the Arabic prompt")
+}
+
 print(failures == 0 ? "selftest: all checks passed" : "selftest: \(failures) failed")
 if failures > 0 { exit(1) }

@@ -64,7 +64,7 @@ actor Transcriber {
     }
 
     /// Native-rate mono samples -> 16 kHz mono, in one pass (no chunk seams).
-    private static func resample(_ audio: Recorder.Audio) throws -> [Float] {
+    static func resample(_ audio: Recorder.Audio) throws -> [Float] {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: audio.sampleRate, channels: 1),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(audio.samples.count))
         else { return [] }

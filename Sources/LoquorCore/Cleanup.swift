@@ -109,6 +109,14 @@ public enum Cleanup {
         }
     }
 
+    /// How long to wait for a cleanup before typing the raw text: the model's base
+    /// time, plus a second per 100 words, so a 3-minute dictation (~450 words) can
+    /// still be cleaned up.
+    public static func timeout(model: String, transcript: String) -> Double {
+        let words = transcript.split(whereSeparator: \.isWhitespace).count
+        return ModelProfile.of(model).timeout + Double(words) / 100
+    }
+
     /// Beta header for the server-side refusal fallback, when the model uses it.
     public static func betaHeader(model: String) -> String? {
         ModelProfile.of(model).fallbacks ? "server-side-fallback-2026-07-01" : nil

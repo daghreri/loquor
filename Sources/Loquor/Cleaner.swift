@@ -40,7 +40,7 @@ enum Cleaner {
     /// Past the model's timeout the raw transcript is typed: dictation is never held up for long.
     static func clean(_ transcript: String, app: String?, words: [String], model: String, key: String,
                       language: DictationLanguage = .english) async -> Cleanup.Outcome {
-        let timeout = Cleanup.ModelProfile.of(model).timeout
+        let timeout = Cleanup.timeout(model: model, transcript: transcript)
         var request = request(Cleanup.endpoint, key: key)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")

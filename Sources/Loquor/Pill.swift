@@ -19,6 +19,11 @@ final class Pill {
         if model.language != label { model.language = label }
     }
 
+    /// Seconds left before hands-free stops on silence, or nil when not warning.
+    func setSilenceLeft(_ seconds: Int?) {
+        if model.silenceLeft != seconds { model.silenceLeft = seconds }
+    }
+
     /// Shows a notice for a few seconds, then hides (unless something newer is showing).
     func flash(_ text: String, seconds: Double = 3) {
         show(.message(text))
@@ -182,6 +187,7 @@ final class PillModel: ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var language: String?
     var limit: TimeInterval = 60
+    @Published var silenceLeft: Int?
     @Published private(set) var levels = [Float](repeating: 0, count: barCount)
 
     func push(_ level: Float) {
@@ -213,7 +219,7 @@ private struct PillView: View {
                         .background(Capsule().fill(.white.opacity(0.18)))
                         .fixedSize()
                 }
-                Clock(elapsed: model.elapsed, limit: model.limit)
+                Clock(elapsed: model.elapsed, limit: model.limit, silenceLeft: model.silenceLeft)
                 if handsFree {
                     Text("esc")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
@@ -259,15 +265,18 @@ private struct Waveform: View {
     }
 }
 
-/// "0:42", or in the last 10 seconds an orange countdown so the cut-off is no surprise.
+/// "0:42"; in the last 10 seconds an orange countdown so the cut-off is no surprise;
+/// "silent · 5s" when hands-free is about to stop on silence.
 private struct Clock: View {
     let elapsed: TimeInterval
     let limit: TimeInterval
+    var silenceLeft: Int?
 
     var body: some View {
         let left = Int((limit - elapsed).rounded(.up))
-        let warn = left <= 10
-        Text(warn ? "\(max(left, 0))s left" : String(format: "%d:%02d", Int(elapsed) / 60, Int(elapsed) % 60))
+        let warn = left <= 10 || silenceLeft != nil
+        Text(silenceLeft.map { "silent · \($0)s" }
+             ?? (left <= 10 ? "\(max(left, 0))s left" : String(format: "%d:%02d", Int(elapsed) / 60, Int(elapsed) % 60)))
             .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
             .foregroundStyle(warn ? Color.orange : Color.white.opacity(0.7))
             .fixedSize()

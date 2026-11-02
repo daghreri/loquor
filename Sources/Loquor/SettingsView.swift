@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject var shortcuts: ShortcutStore
     @ObservedObject var cleanup: CleanupSettings
     @ObservedObject var connectivity: Connectivity
+    @ObservedObject var microphones: Microphones
     let keys: KeyMonitor
 
     // macOS doesn't announce permission changes, so poll while the window is open.
@@ -17,6 +18,7 @@ struct SettingsView: View {
         TabView {
             Form {
                 ShortcutSection(store: shortcuts, keys: keys)
+                MicrophoneSection(microphones: microphones)
                 PermissionsSection(permissions: permissions)
                 Section {
                     Toggle("Start at login", isOn: Binding(get: { loginItem.isEnabled }, set: { loginItem.set($0) }))
@@ -327,6 +329,37 @@ private struct CleanupSection: View {
     private func saveWords() {
         settings.words = wordsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         wordsText = settings.words.joined(separator: ", ")
+    }
+}
+
+// MARK: - Microphone
+
+private struct MicrophoneSection: View {
+    @ObservedObject var microphones: Microphones
+
+    var body: some View {
+        Section {
+            Picker("Microphone", selection: Binding(get: { microphones.chosenUID ?? "" },
+                                                     set: { microphones.chosenUID = $0.isEmpty ? nil : $0 })) {
+                Text("System Default (\(microphones.systemDefault?.name ?? "none"))").tag("")
+                ForEach(microphones.devices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+                if microphones.chosenIsMissing, let uid = microphones.chosenUID {
+                    Text("Not connected").tag(uid)
+                }
+            }
+            if microphones.chosenIsMissing {
+                Label("Your chosen mic isn't connected, so Loquor uses the system default.", systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Microphone")
+        } footer: {
+            Text("System Default follows macOS: AirPods when they connect, back to the built-in mic when you take them out. Bluetooth headsets play lower-quality audio while their mic is in use.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { microphones.refresh() }
     }
 }
 

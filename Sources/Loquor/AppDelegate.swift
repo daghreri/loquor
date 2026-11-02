@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let shortcuts = ShortcutStore()
     private let cleanup = CleanupSettings()
     private let connectivity = Connectivity()
+    private let microphones = Microphones()
     private var shortcutWatch: AnyCancellable?
     private let recorder = Recorder()
     private let pill = Pill()
@@ -89,10 +90,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.pill.hide() }
                 }
             }
+            // com.daghreri.loquor.debug.record: a 4-second recording through the normal
+            // pipeline (logs which microphone the engine opened).
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.record"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handle(.start)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self?.handle(.stop) }
+                }
+            }
         }
-        recorder.onInputChanged = { [weak self] in
-            self?.log.write("input device changed: finishing the recording")
-            self?.keys.timeout()
+        recorder.device = { [weak self] in
+            self?.microphones.refresh()
+            return self?.microphones.deviceForRecording
+        }
+        recorder.onInputChanged = { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .continued(let device):
+                // e.g. AirPods switching into microphone mode, or taken out mid-sentence.
+                self.log.write("mic changed mid-recording, continuing on \(self.microphones.name(of: device))")
+            case .noMicrophone:
+                self.log.write("mic changed mid-recording and no microphone is left: finishing")
+                self.keys.timeout()
+            case .keptChanging:
+                self.log.write("mic kept changing mid-recording: finishing")
+                self.keys.timeout()
+            }
         }
         pill.limitSeconds = Self.maxSeconds
         keys.onAction = { [weak self] action in self?.handle(action) }
@@ -161,6 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pressedAt = .now
             do {
                 try recorder.start()
+                log.write("mic: \(microphones.name(of: recorder.openedDevice))"
+                          + (microphones.chosen != nil ? " (chosen)" : microphones.chosenIsMissing ? " (chosen mic missing, system default)" : " (system default)"))
                 job += 1
                 state = .recording
                 pill.show(.listening(handsFree: false))
@@ -256,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let shortcut = NSMenuItem(title: "Shortcut: \(shortcuts.shortcut.displayName)", action: nil, keyEquivalent: "")
         shortcut.isEnabled = false
         menu.addItem(shortcut)
+        menu.addItem(microphoneMenu())
 
         if !permissions.microphone.granted {
             menu.addItem(item("Allow Microphone…", #selector(fixMicrophone)))
@@ -307,6 +335,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// "Microphone: AirPods Pro ›" with System Default and every input device.
+    private func microphoneMenu() -> NSMenuItem {
+        microphones.refresh()
+        let title = "Microphone: \(microphones.active?.name ?? "None")"
+        let top = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let auto = item("System Default (\(microphones.systemDefault?.name ?? "none"))", #selector(chooseMicrophone(_:)))
+        auto.representedObject = nil
+        auto.state = microphones.chosenUID == nil ? .on : .off
+        sub.addItem(auto)
+        sub.addItem(.separator())
+        for device in microphones.devices {
+            let entry = item(device.name, #selector(chooseMicrophone(_:)))
+            entry.representedObject = device.uid
+            entry.state = microphones.chosenUID == device.uid ? .on : .off
+            sub.addItem(entry)
+        }
+        if microphones.chosenIsMissing {
+            sub.addItem(.separator())
+            let note = NSMenuItem(title: "Your chosen mic isn't connected; using System Default", action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            sub.addItem(note)
+        }
+        top.submenu = sub
+        return top
+    }
+
+    @objc private func chooseMicrophone(_ sender: NSMenuItem) {
+        microphones.chosenUID = sender.representedObject as? String
+    }
+
     // No key equivalents: a menu-bar app never has keyboard focus, so ⌘Q / ⌘, would never fire.
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -337,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, keys: keys)
+            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, microphones: microphones, keys: keys)
             let host = NSHostingController(rootView: view)
             host.sizingOptions = [.preferredContentSize]  // window follows each tab's height
             let window = NSWindow(contentViewController: host)

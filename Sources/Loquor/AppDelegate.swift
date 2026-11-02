@@ -52,8 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var failedAudio: Recorder.Audio?
     private let log = KeyLog(name: "loquor.log")
 
-    /// Longer recordings are usually a forgotten hands-free recording.
-    private static let maxSeconds = 60.0
+    private let dictation = DictationSettings()
+    /// Watches for silence while hands-free (a forgotten session finishes by itself).
+    private var silenceTimer: Timer?
     /// Shorter than this is a slip of the finger, not speech.
     private static let minSeconds = 0.3
 
@@ -90,6 +91,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.pill.hide() }
                 }
             }
+            // com.daghreri.loquor.debug.handsfree: start hands-free and leave it, to see the
+            // silence stop finish it by itself.
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.handsfree"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handle(.start)
+                    self?.handle(.latch)
+                }
+            }
             // com.daghreri.loquor.debug.record: a 4-second recording through the normal
             // pipeline (logs which microphone the engine opened).
             DistributedNotificationCenter.default().addObserver(
@@ -114,13 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.log.write("mic changed mid-recording, continuing on \(self.microphones.active?.name ?? "the default mic")")
             case .noMicrophone:
                 self.log.write("mic changed mid-recording and no microphone is left: finishing")
-                self.keys.timeout()
+                self.keys.finish()
             case .keptChanging:
                 self.log.write("mic kept changing mid-recording: finishing")
-                self.keys.timeout()
+                self.keys.finish()
             }
         }
-        pill.limitSeconds = Self.maxSeconds
         keys.onAction = { [weak self] action in self?.handle(action) }
         shortcutWatch = shortcuts.$shortcut.sink { [weak self] shortcut in self?.keys.shortcut = shortcut }
         keys.start()
@@ -194,8 +204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 job += 1
                 state = .recording
                 pill.show(.listening(handsFree: false))
-                let timer = Timer(timeInterval: Self.maxSeconds, repeats: false) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.keys.timeout() }
+                pill.limitSeconds = Double(dictation.maxSeconds)
+                let timer = Timer(timeInterval: Double(dictation.maxSeconds), repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.keys.finish() }
                 }
                 RunLoop.main.add(timer, forMode: .common)  // fires even while a menu is open
                 capTimer = timer
@@ -207,8 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         case .latch:
             pill.show(.listening(handsFree: true))  // same recording continues
+            watchSilence()
         case .stop:
             capTimer?.invalidate()
+            stopWatchingSilence()
             let audio = recorder.stop()
             let released = ContinuousClock.now
             guard audio.seconds >= Self.minSeconds else {
@@ -221,12 +234,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             process(audio, app: app, released: released)
         case .cancel:
             capTimer?.invalidate()
+            stopWatchingSilence()
             recorder.cancel()
             state = .idle
             pill.hide()
         case .wait:
             break
         }
+    }
+
+    /// Hands-free only: after 20 s of silence, finish and type what was said, so a
+    /// forgotten session doesn't run to the limit. The indicator warns for the last 5 s.
+    private func watchSilence() {
+        stopWatchingSilence()
+        var tracker = DictationLimits.SilenceTracker(now: Date.timeIntervalSinceReferenceDate)
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let silent = tracker.update(level: self.recorder.level, now: Date.timeIntervalSinceReferenceDate)
+                let left = DictationLimits.silenceSeconds - silent
+                self.pill.setSilenceLeft(left <= DictationLimits.silenceWarningSeconds ? max(0, Int(left.rounded(.up))) : nil)
+                if left <= 0 {
+                    self.log.write("hands-free: \(Int(DictationLimits.silenceSeconds)) s of silence, finishing")
+                    self.stopWatchingSilence()
+                    self.keys.finish()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        silenceTimer = timer
+    }
+
+    private func stopWatchingSilence() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        pill.setSilenceLeft(nil)
     }
 
     /// Transcribe, optionally clean up, paste. If transcription fails the audio is
@@ -399,7 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, microphones: microphones, keys: keys)
+            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, microphones: microphones, dictation: dictation, keys: keys)
             let host = NSHostingController(rootView: view)
             host.sizingOptions = [.preferredContentSize]  // window follows each tab's height
             let window = NSWindow(contentViewController: host)

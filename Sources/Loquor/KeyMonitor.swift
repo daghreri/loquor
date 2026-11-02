@@ -71,10 +71,18 @@ final class KeyMonitor {
     }
 
     /// The recording hit its length cap (or the input device changed).
-    func timeout() {
+    /// Finish the recording now (length cap, silence, mic gone) and type what was
+    /// said. Always stops, even if the gesture logic didn't start this recording
+    /// (it found nothing to stop once, and the recording ran on).
+    func finish() {
         let actions = gesture.timeout()
-        log.write("  timeout -> \(actions)")
-        actions.forEach(perform)
+        log.write("  finish -> \(actions)")
+        if actions.contains(.stop) {
+            actions.forEach(perform)
+        } else {
+            gesture.reset()
+            onAction(.stop)
+        }
     }
 
     private func installTap() -> Bool {

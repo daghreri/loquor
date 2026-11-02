@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject var cleanup: CleanupSettings
     @ObservedObject var connectivity: Connectivity
     @ObservedObject var microphones: Microphones
+    @ObservedObject var dictation: DictationSettings
     let keys: KeyMonitor
 
     // macOS doesn't announce permission changes, so poll while the window is open.
@@ -19,6 +20,16 @@ struct SettingsView: View {
             Form {
                 ShortcutSection(store: shortcuts, keys: keys)
                 MicrophoneSection(microphones: microphones)
+                Section {
+                    Picker("Longest dictation", selection: $dictation.maxSeconds) {
+                        ForEach(DictationLimits.choices, id: \.self) { seconds in
+                            Text(seconds == DictationLimits.defaultSeconds ? "1 minute (default)" : "\(seconds / 60) minutes").tag(seconds)
+                        }
+                    }
+                } footer: {
+                    Text("The indicator counts down the last 10 seconds. Hands-free also stops by itself after 20 seconds of silence. Either way, what you said is typed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 PermissionsSection(permissions: permissions)
                 Section {
                     Toggle("Start at login", isOn: Binding(get: { loginItem.isEnabled }, set: { loginItem.set($0) }))

@@ -197,5 +197,18 @@ do {
     check(models.count == 1 && models[0].name == "Claude Haiku 5.5", "models list parsed and filtered")
 }
 
+// Dictation limits
+do {
+    check(DictationLimits.clamp(180) == 180 && DictationLimits.clamp(600) == 60 && DictationLimits.clamp(0) == 60, "limit clamps to 1-3 min")
+    var t = DictationLimits.SilenceTracker(now: 0)
+    check(t.update(level: 0.6, now: 5) == 0, "speech resets silence")
+    check(t.update(level: 0.05, now: 15) == 10, "quiet counts as silence")
+    check(t.update(level: 0.2, now: 26) == 21, "threshold level is still silence")
+    check(t.update(level: 0.3, now: 27) == 0, "speech again resets")
+    let words450 = Array(repeating: "word", count: 450).joined(separator: " ")
+    check(Cleanup.timeout(model: "claude-haiku-5-5", transcript: "send it now") == 3.03, "short cleanup keeps ~3 s")
+    check(Cleanup.timeout(model: "claude-haiku-5-5", transcript: words450) == 7.5, "450 words get 7.5 s")
+}
+
 print(failures == 0 ? "selftest: all checks passed" : "selftest: \(failures) failed")
 if failures > 0 { exit(1) }

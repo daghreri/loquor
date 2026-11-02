@@ -111,9 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder.onInputChanged = { [weak self] change in
             guard let self else { return }
             switch change {
-            case .continued(let device):
+            case .continued:
                 // e.g. AirPods switching into microphone mode, or taken out mid-sentence.
-                self.log.write("mic changed mid-recording, continuing on \(self.microphones.name(of: device))")
+                self.microphones.refresh()
+                self.log.write("mic changed mid-recording, continuing on \(self.microphones.active?.name ?? "the default mic")")
             case .noMicrophone:
                 self.log.write("mic changed mid-recording and no microphone is left: finishing")
                 self.keys.timeout()
@@ -205,8 +206,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pressedAt = .now
             do {
                 try recorder.start()
-                log.write("mic: \(microphones.name(of: recorder.openedDevice))"
-                          + (microphones.chosen != nil ? " (chosen)" : microphones.chosenIsMissing ? " (chosen mic missing, system default)" : " (system default)"))
+                log.write("mic: \(microphones.active?.name ?? "none")"
+                          + (microphones.chosen != nil ? " (chosen)" : microphones.chosenIsMissing ? " (chosen mic missing, system default)" : " (system default)")
+                          + (recorder.deviceOpenedDirectly ? ", opened directly" : ", default route")
+                          + (recorder.fellBack ? ", couldn't open it so using the default route" : ""))
                 job += 1
                 state = .recording
                 keyboard.refresh()

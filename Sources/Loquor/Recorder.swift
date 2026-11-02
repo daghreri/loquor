@@ -26,9 +26,11 @@ final class Recorder: @unchecked Sendable {
         var errorDescription: String? { "No microphone is available." }
     }
 
-    /// Asked for the microphone to (re)start on: the chosen one or the current
-    /// system default, nil when there's none.
+    /// Asked for the microphone to (re)start on: a device to open directly, or nil to
+    /// record through macOS's default input route.
     var device: @MainActor () -> AudioDeviceID? = { nil }
+    /// The last start couldn't open the requested device and used the default route.
+    private(set) var fellBack = false
     enum Change {
         case continued(AudioDeviceID)
         case noMicrophone
@@ -54,12 +56,17 @@ final class Recorder: @unchecked Sendable {
     private var sampleRate: Double = 48_000
     private var lastLevel: Float = 0
     private var restarts = 0
+    /// Frames received so far, to tell a harmless change (audio still arriving) from
+    /// a real stop (silence).
+    private var totalFrames = 0
 
     /// Loudness of the latest buffer, 0...1, for the on-screen waveform.
     var level: Float { lock.withLock { lastLevel } }
 
-    /// The device the engine actually opened, for the log (0 if unknown).
+    /// The device the engine actually opened (0 if unknown).
     private(set) var openedDevice: AudioDeviceID = 0
+    /// Whether the last open pinned a device rather than using the default route.
+    private(set) var deviceOpenedDirectly = false
 
     /// Starts a new recording.
     @MainActor
@@ -68,10 +75,24 @@ final class Recorder: @unchecked Sendable {
         lock.withLock {
             finished = []
             samples = []
+            totalFrames = 0
         }
         restarts = 0
         recording = true
-        try open(device())
+        try openOrFallBack(device())
+    }
+
+    /// Opens `device`; if a directly opened device fails (e.g. a Bluetooth headset
+    /// mid-switch), records through the default route instead of failing.
+    @MainActor
+    private func openOrFallBack(_ device: AudioDeviceID?) throws {
+        fellBack = false
+        do {
+            try open(device)
+        } catch where device != nil {
+            fellBack = true
+            try open(nil)
+        }
     }
 
     /// Stops and returns what was recorded.
@@ -101,6 +122,7 @@ final class Recorder: @unchecked Sendable {
     private func open(_ device: AudioDeviceID?) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        deviceOpenedDirectly = device != nil
         if var id = device, let unit = input.audioUnit {
             // Pin the microphone; must happen before reading the input format.
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
@@ -155,6 +177,7 @@ final class Recorder: @unchecked Sendable {
                     self.sampleRate = rate
                 }
                 self.samples.append(contentsOf: chunk)
+                self.totalFrames += chunk.count
                 self.lastLevel = level
             }
         }
@@ -165,29 +188,32 @@ final class Recorder: @unchecked Sendable {
     @MainActor
     private func inputChanged() {
         guard recording else { return }
-        // Opening a specific device always sends one change notification right after
-        // start while the engine keeps running and recording (measured): nothing to do.
-        // Restart only when macOS has really stopped the engine.
-        if let engine, engine.isRunning { return }
-        if engine != nil {
-            halt()
-            lock.withLock {
-                if !samples.isEmpty { finished.append(Segment(samples: samples, sampleRate: sampleRate)) }
-                samples = []
-            }
-        }
+        // Opening a device sends a change notification right after start, usually while
+        // audio keeps arriving (measured). So wait for the burst to settle, then look:
+        // audio still arriving means nothing to do; silence or a stopped engine means
+        // restart on the right mic in a new segment.
+        let framesBefore = lock.withLock { totalFrames }
         restartToken += 1
         let token = restartToken
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.settle) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.recording, self.restartToken == token else { return }
+                let flowing = self.lock.withLock { self.totalFrames } > framesBefore
+                if let engine = self.engine, engine.isRunning, flowing { return }
+                self.halt()
+                self.lock.withLock {
+                    if !self.samples.isEmpty {
+                        self.finished.append(Segment(samples: self.samples, sampleRate: self.sampleRate))
+                    }
+                    self.samples = []
+                }
                 self.restarts += 1
                 guard self.restarts <= Self.maxRestarts else {
                     self.onInputChanged(.keptChanging)
                     return
                 }
                 do {
-                    try self.open(self.device())
+                    try self.openOrFallBack(self.device())
                     self.onInputChanged(.continued(self.openedDevice))
                 } catch {
                     self.onInputChanged(.noMicrophone)
@@ -195,6 +221,7 @@ final class Recorder: @unchecked Sendable {
             }
         }
     }
+
 
     private func halt() {
         removeObserver()

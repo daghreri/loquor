@@ -76,6 +76,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !permissions.allGranted || keyNeedsApproval || CommandLine.arguments.contains("--settings") { openSettings() }
 
         pill.level = { [recorder] in recorder.level }
+        pill.log = { [log] line in log.write(line) }
+        // Developer testing (launch with --debug): show the indicator without the keyboard,
+        // e.g. over a full-screen app: post com.daghreri.loquor.debug.pill.
+        if CommandLine.arguments.contains("--debug") {
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.pill"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.pill.show(.listening(handsFree: false))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.pill.hide() }
+                }
+            }
+        }
         recorder.onInputChanged = { [weak self] in
             self?.log.write("input device changed: finishing the recording")
             self?.keys.timeout()

@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import SwiftUI
 
 /// The floating indicator at the bottom of the screen while dictating, like
@@ -11,6 +12,11 @@ final class Pill {
         case transcribing
         case cleaning   // waiting for Claude
         case message(String)  // a short notice, e.g. the model is still loading
+    }
+
+    /// Seconds left before hands-free stops on silence, or nil when not warning.
+    func setSilenceLeft(_ seconds: Int?) {
+        if model.silenceLeft != seconds { model.silenceLeft = seconds }
     }
 
     /// Shows a notice for a few seconds, then hides (unless something newer is showing).
@@ -30,6 +36,9 @@ final class Pill {
     private var meter: Timer?
     /// Bumped on every show, so a fade-out that finishes late doesn't hide a newer pill.
     private var generation = 0
+
+    /// Diagnostics (where the pill went and whether macOS shows it), to the app log.
+    var log: (String) -> Void = { _ in }
 
     /// Where the waveform reads its loudness from while listening.
     var level: () -> Float = { 0 }
@@ -55,6 +64,22 @@ final class Pill {
             if !panel.isVisible { panel.alphaValue = 0 }
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { $0.duration = 0.15; panel.animator().alphaValue = 1 }
+            report(panel)
+        }
+    }
+
+    /// Logs where the pill went, and a moment later whether macOS actually shows it
+    /// (on the active Space and not occluded), to diagnose full-screen apps.
+    private func report(_ panel: NSPanel) {
+        let shown = generation
+        let screen = panel.screen?.localizedName ?? "none"
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == shown, panel.isVisible else { return }
+                self.log("pill: screen=\(screen) frontApp=\(front) onActiveSpace=\(panel.isOnActiveSpace) "
+                         + "occlusionVisible=\(panel.occlusionState.contains(.visible)) alpha=\(panel.alphaValue)")
+            }
         }
     }
 
@@ -98,7 +123,8 @@ final class Pill {
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 44),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        // Above full-screen apps, videos and presentations; it's tiny and click-through.
+        panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -112,13 +138,39 @@ final class Pill {
         return panel
     }
 
-    /// Bottom centre of the screen with the mouse (where the user is working), above the Dock.
+    /// Bottom centre of the display with the window being typed into, so with several
+    /// displays the indicator is where the user is looking (the mouse is often parked
+    /// on another display). Falls back to the display with the mouse.
     private func position(_ panel: NSPanel) {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        let screen = Self.focusedWindowScreen()
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+            ?? NSScreen.main
         guard let area = screen?.visibleFrame else { return }
         let size = panel.frame.size
         panel.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.minY + 24))
+    }
+
+    /// The display showing the frontmost app's focused window (via Accessibility).
+    private static func focusedWindowScreen() -> NSScreen? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let element = AXUIElementCreateApplication(app.processIdentifier)
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXFocusedWindowAttribute as CFString, &window) == .success,
+              let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
+        let axWindow = window as! AXUIElement
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue, let sizeValue else { return nil }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        AXValueGetValue(positionValue as! AXValue, .cgPoint, &origin)
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        // Accessibility uses top-left coordinates from the main display; AppKit bottom-left.
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        let center = NSPoint(x: origin.x + size.width / 2, y: mainHeight - (origin.y + size.height / 2))
+        return NSScreen.screens.first { $0.frame.contains(center) }
     }
 }
 
@@ -129,6 +181,7 @@ final class PillModel: ObservableObject {
     @Published var mode: Pill.Mode = .listening(handsFree: false)
     @Published var elapsed: TimeInterval = 0
     var limit: TimeInterval = 60
+    @Published var silenceLeft: Int?
     @Published private(set) var levels = [Float](repeating: 0, count: barCount)
 
     func push(_ level: Float) {
@@ -151,7 +204,7 @@ private struct PillView: View {
             case .listening(let handsFree):
                 Circle().fill(.red).frame(width: 7, height: 7)
                 Waveform(levels: model.levels)
-                Clock(elapsed: model.elapsed, limit: model.limit)
+                Clock(elapsed: model.elapsed, limit: model.limit, silenceLeft: model.silenceLeft)
                 if handsFree {
                     Text("esc")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
@@ -197,15 +250,18 @@ private struct Waveform: View {
     }
 }
 
-/// "0:42", or in the last 10 seconds an orange countdown so the cut-off is no surprise.
+/// "0:42"; in the last 10 seconds an orange countdown so the cut-off is no surprise;
+/// "silent · 5s" when hands-free is about to stop on silence.
 private struct Clock: View {
     let elapsed: TimeInterval
     let limit: TimeInterval
+    var silenceLeft: Int?
 
     var body: some View {
         let left = Int((limit - elapsed).rounded(.up))
-        let warn = left <= 10
-        Text(warn ? "\(max(left, 0))s left" : String(format: "%d:%02d", Int(elapsed) / 60, Int(elapsed) % 60))
+        let warn = left <= 10 || silenceLeft != nil
+        Text(silenceLeft.map { "silent · \($0)s" }
+             ?? (left <= 10 ? "\(max(left, 0))s left" : String(format: "%d:%02d", Int(elapsed) / 60, Int(elapsed) % 60)))
             .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
             .foregroundStyle(warn ? Color.orange : Color.white.opacity(0.7))
             .fixedSize()

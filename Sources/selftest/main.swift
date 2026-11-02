@@ -197,5 +197,32 @@ do {
     check(models.count == 1 && models[0].name == "Claude Haiku 5.5", "models list parsed and filtered")
 }
 
+// Dictation limits
+do {
+    check(DictationLimits.clamp(180) == 180 && DictationLimits.clamp(600) == 60 && DictationLimits.clamp(0) == 60, "limit clamps to 1-3 min")
+    var t = DictationLimits.SilenceTracker(now: 0)
+    check(t.update(level: 0.6, now: 5) == 0, "speech resets silence")
+    check(t.update(level: 0.05, now: 15) == 10, "quiet counts as silence")
+    check(t.update(level: 0.2, now: 26) == 21, "threshold level is still silence")
+    check(t.update(level: 0.3, now: 27) == 0, "speech again resets")
+    let words450 = Array(repeating: "word", count: 450).joined(separator: " ")
+    check(Cleanup.timeout(model: "claude-haiku-5-5", transcript: "send it now") == 3.03, "short cleanup keeps ~3 s")
+    check(Cleanup.timeout(model: "claude-haiku-5-5", transcript: words450) == 7.5, "450 words get 7.5 s")
+}
+
+// Updates
+do {
+    check(Updates.isNewer("0.1.1", than: "0.1.0"), "patch is newer")
+    check(Updates.isNewer("v0.1.10", than: "0.1.9"), "numeric, not text, comparison")
+    check(Updates.isNewer("1.0", than: "0.9.9"), "major is newer")
+    check(!Updates.isNewer("0.1.0", than: "0.1.0"), "same isn't newer")
+    check(!Updates.isNewer("0.1.0", than: "0.1.1"), "older isn't newer")
+    check(!Updates.isNewer("0.1", than: "0.1.0"), "0.1 equals 0.1.0")
+    let json = Data(#"{"tag_name":"v0.1.1","html_url":"https://github.com/daghreri/loquor/releases/tag/v0.1.1","draft":false,"prerelease":false}"#.utf8)
+    check(Updates.parse(json) == .init(version: "0.1.1", page: URL(string: "https://github.com/daghreri/loquor/releases/tag/v0.1.1")!), "release parsed")
+    check(Updates.parse(Data(#"{"tag_name":"v0.2.0","html_url":"https://x.y","prerelease":true}"#.utf8)) == nil, "pre-release ignored")
+    check(Updates.parse(Data("{}".utf8)) == nil, "junk ignored")
+}
+
 print(failures == 0 ? "selftest: all checks passed" : "selftest: \(failures) failed")
 if failures > 0 { exit(1) }

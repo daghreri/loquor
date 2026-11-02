@@ -63,16 +63,21 @@ actor Transcriber {
         }
     }
 
-    /// Native-rate mono samples -> 16 kHz mono, in one pass (no chunk seams).
-    private static func resample(_ audio: Recorder.Audio) throws -> [Float] {
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: audio.sampleRate, channels: 1),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(audio.samples.count))
-        else { return [] }
-        buffer.frameLength = AVAudioFrameCount(audio.samples.count)
-        audio.samples.withUnsafeBufferPointer { src in
-            buffer.floatChannelData![0].update(from: src.baseAddress!, count: src.count)
+    /// Native-rate mono segments -> one 16 kHz mono stream. Each segment is resampled
+    /// in one pass (no chunk seams); segments can differ in rate after a mic change.
+    static func resample(_ audio: Recorder.Audio) throws -> [Float] {
+        var out: [Float] = []
+        for segment in audio.segments where !segment.samples.isEmpty {
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: segment.sampleRate, channels: 1),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(segment.samples.count))
+            else { continue }
+            buffer.frameLength = AVAudioFrameCount(segment.samples.count)
+            segment.samples.withUnsafeBufferPointer { src in
+                buffer.floatChannelData![0].update(from: src.baseAddress!, count: src.count)
+            }
+            out += try AudioConverter().resampleBuffer(buffer)
         }
-        return try AudioConverter().resampleBuffer(buffer)
+        return out
     }
 }
 

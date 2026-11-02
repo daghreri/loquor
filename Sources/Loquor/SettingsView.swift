@@ -8,6 +8,9 @@ struct SettingsView: View {
     @ObservedObject var shortcuts: ShortcutStore
     @ObservedObject var cleanup: CleanupSettings
     @ObservedObject var connectivity: Connectivity
+    @ObservedObject var microphones: Microphones
+    @ObservedObject var dictation: DictationSettings
+    @ObservedObject var updates: UpdateChecker
     let keys: KeyMonitor
 
     // macOS doesn't announce permission changes, so poll while the window is open.
@@ -17,6 +20,17 @@ struct SettingsView: View {
         TabView {
             Form {
                 ShortcutSection(store: shortcuts, keys: keys)
+                MicrophoneSection(microphones: microphones)
+                Section {
+                    Picker("Longest dictation", selection: $dictation.maxSeconds) {
+                        ForEach(DictationLimits.choices, id: \.self) { seconds in
+                            Text(seconds == DictationLimits.defaultSeconds ? "1 minute (default)" : "\(seconds / 60) minutes").tag(seconds)
+                        }
+                    }
+                } footer: {
+                    Text("The indicator counts down the last 10 seconds. Hands-free also stops by itself after 20 seconds of silence. Either way, what you said is typed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 PermissionsSection(permissions: permissions)
                 Section {
                     Toggle("Start at login", isOn: Binding(get: { loginItem.isEnabled }, set: { loginItem.set($0) }))
@@ -36,6 +50,7 @@ struct SettingsView: View {
 
             Form {
                 AboutSection()
+                UpdatesSection(updates: updates)
             }
             .formStyle(.grouped)
             .tabItem { Label("About", systemImage: "info.circle") }
@@ -327,6 +342,63 @@ private struct CleanupSection: View {
     private func saveWords() {
         settings.words = wordsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         wordsText = settings.words.joined(separator: ", ")
+    }
+}
+
+// MARK: - Microphone
+
+private struct MicrophoneSection: View {
+    @ObservedObject var microphones: Microphones
+
+    var body: some View {
+        Section {
+            Picker("Microphone", selection: Binding(get: { microphones.chosenUID ?? "" },
+                                                     set: { microphones.chosenUID = $0.isEmpty ? nil : $0 })) {
+                Text("System Default (\(microphones.systemDefault?.name ?? "none"))").tag("")
+                ForEach(microphones.devices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+                if microphones.chosenIsMissing, let uid = microphones.chosenUID {
+                    Text("Not connected").tag(uid)
+                }
+            }
+            if microphones.chosenIsMissing {
+                Label("Your chosen mic isn't connected, so Loquor uses the system default.", systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Microphone")
+        } footer: {
+            Text("System Default follows macOS: AirPods when they connect, back to the built-in mic when you take them out. Bluetooth headsets play lower-quality audio while their mic is in use.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { microphones.refresh() }
+    }
+}
+
+// MARK: - Updates
+
+private struct UpdatesSection: View {
+    @ObservedObject var updates: UpdateChecker
+
+    var body: some View {
+        Section {
+            Toggle("Check for updates automatically", isOn: $updates.automatic)
+            HStack {
+                Text(updates.lastResult ?? "Version \(updates.current)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if updates.available != nil {
+                    Button("Download Update…", action: updates.openDownload).controlSize(.small)
+                }
+                Button("Check Now") { updates.check(manual: true) }.controlSize(.small)
+            }
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text("Once a day Loquor asks GitHub for the latest release. Nothing about you or your Mac is sent.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

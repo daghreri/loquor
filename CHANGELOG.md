@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1
+
+- **Indicator on the right display:** it now appears on the display you're typing on (it
+  followed the mouse, so with two displays it often seemed missing over full-screen apps),
+  and stays above full-screen apps and videos.
+- **Microphone:** the menu bar and Settings show the microphone in use; pick one, or System
+  Default, which follows macOS (AirPods in, built-in mic out). Fixed AirPods recording
+  silence, dictation ending about a second in after a mic switch, and a "-10868" error.
+- **Longest dictation:** 1 minute by default, up to 3 minutes in Settings. Hands-free stops
+  by itself after 20 seconds of silence and types what you said.
+- **Cleanup** gets more time for longer dictations.
+- **Update alerts:** Loquor checks GitHub once a day and shows "Download Update" in the
+  menu when there's a new release (can be turned off in Settings › About).
+
 ## 0.1.0
 
 First public release.

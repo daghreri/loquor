@@ -128,7 +128,7 @@ list**. Audio is never sent.
 | Text | Stays on your Mac, unless you turn on cleanup (see above). |
 | Settings | Shortcut, model and word list in `~/Library/Preferences/com.daghreri.loquor.plist` (not encrypted). |
 | Logs | `~/Library/Logs/Loquor`: timings while the shortcut is in use, never what you said. |
-| Network | Downloading the speech model once (unless you use the offline build), and cleanup if you turn it on. Nothing else. |
+| Network | Downloading the speech model once (unless you use the offline build), cleanup if you turn it on, and a daily check of GitHub for a newer release (can be turned off in Settings › About). Nothing else. |
 
 ## What it's built from
 

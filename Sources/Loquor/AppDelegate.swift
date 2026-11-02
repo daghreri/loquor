@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let shortcuts = ShortcutStore()
     private let cleanup = CleanupSettings()
     private let connectivity = Connectivity()
+    private let microphones = Microphones()
     private var shortcutWatch: AnyCancellable?
     private let recorder = Recorder()
     private let pill = Pill()
@@ -51,8 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var failedAudio: Recorder.Audio?
     private let log = KeyLog(name: "loquor.log")
 
-    /// Longer recordings are usually a forgotten hands-free recording.
-    private static let maxSeconds = 60.0
+    private let dictation = DictationSettings()
+    private let updates = UpdateChecker()
+    private var updateWatch: AnyCancellable?
+    /// Watches for silence while hands-free (a forgotten session finishes by itself).
+    private var silenceTimer: Timer?
     /// Shorter than this is a slip of the finger, not speech.
     private static let minSeconds = 0.3
 
@@ -76,15 +80,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !permissions.allGranted || keyNeedsApproval || CommandLine.arguments.contains("--settings") { openSettings() }
 
         pill.level = { [recorder] in recorder.level }
-        recorder.onInputChanged = { [weak self] in
-            self?.log.write("input device changed: finishing the recording")
-            self?.keys.timeout()
+        pill.log = { [log] line in log.write(line) }
+        // Developer testing (launch with --debug): show the indicator without the keyboard,
+        // e.g. over a full-screen app: post com.daghreri.loquor.debug.pill.
+        if CommandLine.arguments.contains("--debug") {
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.pill"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.pill.show(.listening(handsFree: false))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.pill.hide() }
+                }
+            }
+            // com.daghreri.loquor.debug.handsfree: start hands-free and leave it, to see the
+            // silence stop finish it by itself.
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.handsfree"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handle(.start)
+                    self?.handle(.latch)
+                }
+            }
+            // com.daghreri.loquor.debug.record: a 4-second recording through the normal
+            // pipeline (logs which microphone the engine opened).
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("com.daghreri.loquor.debug.record"), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handle(.start)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self?.handle(.stop) }
+                }
+            }
         }
-        pill.limitSeconds = Self.maxSeconds
+        recorder.device = { [weak self] in
+            self?.microphones.refresh()
+            return self?.microphones.deviceForRecording
+        }
+        recorder.onInputChanged = { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .continued:
+                // e.g. AirPods switching into microphone mode, or taken out mid-sentence.
+                self.microphones.refresh()
+                self.log.write("mic changed mid-recording, continuing on \(self.microphones.active?.name ?? "the default mic")")
+            case .noMicrophone:
+                self.log.write("mic changed mid-recording and no microphone is left: finishing")
+                self.keys.finish()
+            case .keptChanging:
+                self.log.write("mic kept changing mid-recording: finishing")
+                self.keys.finish()
+            }
+        }
         keys.onAction = { [weak self] action in self?.handle(action) }
         shortcutWatch = shortcuts.$shortcut.sink { [weak self] shortcut in self?.keys.shortcut = shortcut }
         keys.start()
         loadModel()
+        updates.onLog = { [log] line in log.write(line) }
+        updateWatch = updates.$available.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.updateIcon() }
+        }
+        updates.start()
     }
 
     private func loadModel() {
@@ -147,11 +204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pressedAt = .now
             do {
                 try recorder.start()
+                log.write("mic: \(microphones.active?.name ?? "none")"
+                          + (microphones.chosen != nil ? " (chosen)" : microphones.chosenIsMissing ? " (chosen mic missing, system default)" : " (system default)")
+                          + (recorder.deviceOpenedDirectly ? ", opened directly" : ", default route")
+                          + (recorder.fellBack ? ", couldn't open it so using the default route" : ""))
                 job += 1
                 state = .recording
                 pill.show(.listening(handsFree: false))
-                let timer = Timer(timeInterval: Self.maxSeconds, repeats: false) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.keys.timeout() }
+                pill.limitSeconds = Double(dictation.maxSeconds)
+                let timer = Timer(timeInterval: Double(dictation.maxSeconds), repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.keys.finish() }
                 }
                 RunLoop.main.add(timer, forMode: .common)  // fires even while a menu is open
                 capTimer = timer
@@ -163,8 +225,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         case .latch:
             pill.show(.listening(handsFree: true))  // same recording continues
+            watchSilence()
         case .stop:
             capTimer?.invalidate()
+            stopWatchingSilence()
             let audio = recorder.stop()
             let released = ContinuousClock.now
             guard audio.seconds >= Self.minSeconds else {
@@ -177,12 +241,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             process(audio, app: app, released: released)
         case .cancel:
             capTimer?.invalidate()
+            stopWatchingSilence()
             recorder.cancel()
             state = .idle
             pill.hide()
         case .wait:
             break
         }
+    }
+
+    /// Hands-free only: after 20 s of silence, finish and type what was said, so a
+    /// forgotten session doesn't run to the limit. The indicator warns for the last 5 s.
+    private func watchSilence() {
+        stopWatchingSilence()
+        var tracker = DictationLimits.SilenceTracker(now: Date.timeIntervalSinceReferenceDate)
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let silent = tracker.update(level: self.recorder.level, now: Date.timeIntervalSinceReferenceDate)
+                let left = DictationLimits.silenceSeconds - silent
+                self.pill.setSilenceLeft(left <= DictationLimits.silenceWarningSeconds ? max(0, Int(left.rounded(.up))) : nil)
+                if left <= 0 {
+                    self.log.write("hands-free: \(Int(DictationLimits.silenceSeconds)) s of silence, finishing")
+                    self.stopWatchingSilence()
+                    self.keys.finish()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        silenceTimer = timer
+    }
+
+    private func stopWatchingSilence() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        pill.setSilenceLeft(nil)
     }
 
     /// Transcribe, optionally clean up, paste. If transcription fails the audio is
@@ -226,9 +319,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIcon() {
-        let image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: "Loquor: \(state.label)")
-        image?.isTemplate = true
-        statusItem.button?.image = image
+        guard let symbol = NSImage(systemSymbolName: state.symbol, accessibilityDescription: "Loquor: \(state.label)") else { return }
+        guard updates.available != nil else {
+            symbol.isTemplate = true
+            statusItem.button?.image = symbol
+            return
+        }
+        // An update is waiting: the mic in the menu bar's text colour plus a small dot.
+        let size = symbol.size
+        let badged = NSImage(size: size, flipped: false) { rect in
+            let tinted = symbol.withSymbolConfiguration(.init(paletteColors: [.labelColor])) ?? symbol
+            tinted.draw(in: rect)
+            NSColor.systemRed.setFill()  // like macOS's own update badges
+            let d = max(5, size.width * 0.38)
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - d, y: rect.maxY - d, width: d, height: d)).fill()
+            return true
+        }
+        badged.isTemplate = false
+        badged.accessibilityDescription = "Loquor: \(state.label), update available"
+        statusItem.button?.image = badged
     }
 
     // Rebuilt each time it opens, so permission and login status are current.
@@ -242,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let shortcut = NSMenuItem(title: "Shortcut: \(shortcuts.shortcut.displayName)", action: nil, keyEquivalent: "")
         shortcut.isEnabled = false
         menu.addItem(shortcut)
+        menu.addItem(microphoneMenu())
 
         if !permissions.microphone.granted {
             menu.addItem(item("Allow Microphone…", #selector(fixMicrophone)))
@@ -279,6 +389,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let login = item("Start at Login", #selector(toggleLogin))
         login.state = loginItem.isEnabled ? .on : .off
         menu.addItem(login)
+        if let release = updates.available {
+            // Right above Settings, where people look: hard to miss.
+            let update = item("Loquor \(release.version) is available: Download Now", #selector(downloadUpdate))
+            // Semibold in the normal menu colour (a coloured title clashes with the blue
+            // hover highlight); the template icon turns white with the text on hover.
+            update.attributedTitle = NSAttributedString(string: update.title, attributes: [
+                .font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
+            ])
+            let icon = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            icon?.isTemplate = true
+            update.image = icon
+            menu.addItem(update)
+        } else {
+            menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
+        }
         menu.addItem(item("Settings…", #selector(openSettings)))
         menu.addItem(.separator())
         menu.addItem(item("Quit Loquor", #selector(quit)))
@@ -291,6 +416,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .failed: "Speech model failed to load"
         case .ready: state.label
         }
+    }
+
+    /// "Microphone: AirPods Pro ›" with System Default and every input device.
+    private func microphoneMenu() -> NSMenuItem {
+        microphones.refresh()
+        let title = "Microphone: \(microphones.active?.name ?? "None")"
+        let top = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let auto = item("System Default (\(microphones.systemDefault?.name ?? "none"))", #selector(chooseMicrophone(_:)))
+        auto.representedObject = nil
+        auto.state = microphones.chosenUID == nil ? .on : .off
+        sub.addItem(auto)
+        sub.addItem(.separator())
+        for device in microphones.devices {
+            let entry = item(device.name, #selector(chooseMicrophone(_:)))
+            entry.representedObject = device.uid
+            entry.state = microphones.chosenUID == device.uid ? .on : .off
+            sub.addItem(entry)
+        }
+        if microphones.chosenIsMissing {
+            sub.addItem(.separator())
+            let note = NSMenuItem(title: "Your chosen mic isn't connected; using System Default", action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            sub.addItem(note)
+        }
+        top.submenu = sub
+        return top
+    }
+
+    @objc private func chooseMicrophone(_ sender: NSMenuItem) {
+        microphones.chosenUID = sender.representedObject as? String
     }
 
     // No key equivalents: a menu-bar app never has keyboard focus, so ⌘Q / ⌘, would never fire.
@@ -307,6 +463,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissions.requestKeychain()
     }
     @objc private func retryModel() { loadModel() }
+    @objc private func downloadUpdate() { updates.openDownload() }
+    @objc private func checkForUpdates() {
+        Task {
+            let result = await updates.checkNow()
+            let alert = NSAlert()
+            switch result {
+            case true?:
+                alert.messageText = "Loquor \(updates.available?.version ?? "") is available"
+                alert.informativeText = "Download it, then drag it to Applications to replace this version. Your settings and permissions are kept."
+                alert.addButton(withTitle: "Download Now")
+                alert.addButton(withTitle: "Later")
+            case false?:
+                alert.messageText = "You're up to date"
+                alert.informativeText = "Loquor \(updates.current) is the latest version."
+            case nil:
+                alert.messageText = "Couldn't check for updates"
+                alert.informativeText = "Loquor couldn't reach GitHub. Check your connection and try again."
+            }
+            NSApp.activate()
+            if alert.runModal() == .alertFirstButtonReturn, result == true { updates.openDownload() }
+        }
+    }
     @objc private func copyLast() {
         guard let lastText else { return }
         NSPasteboard.general.clearContents()
@@ -323,7 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, keys: keys)
+            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, microphones: microphones, dictation: dictation, updates: updates, keys: keys)
             let host = NSHostingController(rootView: view)
             host.sizingOptions = [.preferredContentSize]  // window follows each tab's height
             let window = NSWindow(contentViewController: host)
@@ -335,5 +513,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NSApp.activate()
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private extension NSFont {
+    func withWeight(_ weight: NSFont.Weight) -> NSFont {
+        NSFont.systemFont(ofSize: pointSize, weight: weight)
     }
 }

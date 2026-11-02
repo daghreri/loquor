@@ -48,28 +48,33 @@ final class UpdateChecker: ObservableObject {
     }
 
     func check(manual: Bool) {
-        Task {
-            var request = URLRequest(url: Updates.latestReleaseURL, timeoutInterval: 15)
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            request.setValue("Loquor/\(current)", forHTTPHeaderField: "User-Agent")
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  let latest = Updates.parse(data)
-            else {
-                lastResult = "Couldn't reach GitHub."
-                onLog("update check failed")
-                return
-            }
-            if Updates.isNewer(latest.version, than: current) {
-                available = latest
-                lastResult = "Loquor \(latest.version) is available."
-                onLog("update available: \(latest.version) (running \(current))")
-                notifyOnce(latest)
-            } else {
-                available = nil
-                lastResult = "You have the latest version (\(current))."
-            }
+        Task { await checkNow() }
+    }
+
+    /// Checks and returns whether a newer version is available (nil: couldn't check).
+    @discardableResult
+    func checkNow() async -> Bool? {
+        var request = URLRequest(url: Updates.latestReleaseURL, timeoutInterval: 15)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Loquor/\(current)", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let latest = Updates.parse(data)
+        else {
+            lastResult = "Couldn't reach GitHub."
+            onLog("update check failed")
+            return nil
         }
+        guard Updates.isNewer(latest.version, than: current) else {
+            available = nil
+            lastResult = "You have the latest version (\(current))."
+            return false
+        }
+        available = latest
+        lastResult = "Loquor \(latest.version) is available."
+        onLog("update available: \(latest.version) (running \(current))")
+        notifyOnce(latest)
+        return true
     }
 
     func openDownload() {

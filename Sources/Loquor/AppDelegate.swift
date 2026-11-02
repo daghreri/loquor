@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let dictation = DictationSettings()
     private let updates = UpdateChecker()
+    private var updateWatch: AnyCancellable?
     /// Watches for silence while hands-free (a forgotten session finishes by itself).
     private var silenceTimer: Timer?
     /// Shorter than this is a slip of the finger, not speech.
@@ -146,6 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keys.start()
         loadModel()
         updates.onLog = { [log] line in log.write(line) }
+        updateWatch = updates.$available.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.updateIcon() }
+        }
         updates.start()
     }
 
@@ -349,9 +353,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIcon() {
-        let image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: "Loquor: \(state.label)")
-        image?.isTemplate = true
-        statusItem.button?.image = image
+        guard let symbol = NSImage(systemSymbolName: state.symbol, accessibilityDescription: "Loquor: \(state.label)") else { return }
+        guard updates.available != nil else {
+            symbol.isTemplate = true
+            statusItem.button?.image = symbol
+            return
+        }
+        // An update is waiting: the mic in the menu bar's text colour plus a small dot.
+        let size = symbol.size
+        let badged = NSImage(size: size, flipped: false) { rect in
+            let tinted = symbol.withSymbolConfiguration(.init(paletteColors: [.labelColor])) ?? symbol
+            tinted.draw(in: rect)
+            NSColor.systemRed.setFill()  // like macOS's own update badges
+            let d = max(5, size.width * 0.38)
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - d, y: rect.maxY - d, width: d, height: d)).fill()
+            return true
+        }
+        badged.isTemplate = false
+        badged.accessibilityDescription = "Loquor: \(state.label), update available"
+        statusItem.button?.image = badged
     }
 
     // Rebuilt each time it opens, so permission and login status are current.
@@ -359,10 +379,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissions.refresh()
         menu.removeAllItems()
 
-        if let release = updates.available {
-            menu.addItem(item("Download Update: Loquor \(release.version)…", #selector(downloadUpdate)))
-            menu.addItem(.separator())
-        }
         let status = NSMenuItem(title: "Loquor: \(statusText)", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -407,6 +423,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let login = item("Start at Login", #selector(toggleLogin))
         login.state = loginItem.isEnabled ? .on : .off
         menu.addItem(login)
+        if let release = updates.available {
+            // Right above Settings, where people look: hard to miss.
+            let update = item("Loquor \(release.version) is available: Download Now", #selector(downloadUpdate))
+            // Semibold in the normal menu colour (a coloured title clashes with the blue
+            // hover highlight); the template icon turns white with the text on hover.
+            update.attributedTitle = NSAttributedString(string: update.title, attributes: [
+                .font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
+            ])
+            let icon = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            icon?.isTemplate = true
+            update.image = icon
+            menu.addItem(update)
+        } else {
+            menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
+        }
         menu.addItem(item("Settings…", #selector(openSettings)))
         menu.addItem(.separator())
         menu.addItem(item("Quit Loquor", #selector(quit)))
@@ -467,6 +498,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc private func retryModel() { loadModel() }
     @objc private func downloadUpdate() { updates.openDownload() }
+    @objc private func checkForUpdates() {
+        Task {
+            let result = await updates.checkNow()
+            let alert = NSAlert()
+            switch result {
+            case true?:
+                alert.messageText = "Loquor \(updates.available?.version ?? "") is available"
+                alert.informativeText = "Download it, then drag it to Applications to replace this version. Your settings and permissions are kept."
+                alert.addButton(withTitle: "Download Now")
+                alert.addButton(withTitle: "Later")
+            case false?:
+                alert.messageText = "You're up to date"
+                alert.informativeText = "Loquor \(updates.current) is the latest version."
+            case nil:
+                alert.messageText = "Couldn't check for updates"
+                alert.informativeText = "Loquor couldn't reach GitHub. Check your connection and try again."
+            }
+            NSApp.activate()
+            if alert.runModal() == .alertFirstButtonReturn, result == true { updates.openDownload() }
+        }
+    }
     @objc private func copyLast() {
         guard let lastText else { return }
         NSPasteboard.general.clearContents()
@@ -497,5 +549,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NSApp.activate()
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private extension NSFont {
+    func withWeight(_ weight: NSFont.Weight) -> NSFont {
+        NSFont.systemFont(ofSize: pointSize, weight: weight)
     }
 }

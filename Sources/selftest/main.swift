@@ -210,5 +210,19 @@ do {
     check(Cleanup.timeout(model: "claude-haiku-5-5", transcript: words450) == 7.5, "450 words get 7.5 s")
 }
 
+// Updates
+do {
+    check(Updates.isNewer("0.1.1", than: "0.1.0"), "patch is newer")
+    check(Updates.isNewer("v0.1.10", than: "0.1.9"), "numeric, not text, comparison")
+    check(Updates.isNewer("1.0", than: "0.9.9"), "major is newer")
+    check(!Updates.isNewer("0.1.0", than: "0.1.0"), "same isn't newer")
+    check(!Updates.isNewer("0.1.0", than: "0.1.1"), "older isn't newer")
+    check(!Updates.isNewer("0.1", than: "0.1.0"), "0.1 equals 0.1.0")
+    let json = Data(#"{"tag_name":"v0.1.1","html_url":"https://github.com/daghreri/loquor/releases/tag/v0.1.1","draft":false,"prerelease":false}"#.utf8)
+    check(Updates.parse(json) == .init(version: "0.1.1", page: URL(string: "https://github.com/daghreri/loquor/releases/tag/v0.1.1")!), "release parsed")
+    check(Updates.parse(Data(#"{"tag_name":"v0.2.0","html_url":"https://x.y","prerelease":true}"#.utf8)) == nil, "pre-release ignored")
+    check(Updates.parse(Data("{}".utf8)) == nil, "junk ignored")
+}
+
 print(failures == 0 ? "selftest: all checks passed" : "selftest: \(failures) failed")
 if failures > 0 { exit(1) }

@@ -44,11 +44,15 @@ final class Microphones: ObservableObject {
     /// What the next recording will use.
     var active: Device? { chosen ?? systemDefault }
 
-    /// The device to record from: the chosen one, else macOS's default input as it is
-    /// right now (looked up at the start of each recording, so it follows AirPods in
-    /// and out). Opening it by id, rather than through the engine's hidden default
-    /// wrapper, keeps the log and the menu honest about which mic is used.
-    var deviceForRecording: AudioDeviceID? { active?.id }
+    /// The device to open directly, or nil to record through macOS's default route.
+    /// The default route is used whenever the mic is the system default (always, with
+    /// System Default): opening AirPods directly gave silence or -10868 when they
+    /// switched into microphone mode, while the default route works, like Voice Memos
+    /// (measured 2026-11-02). A chosen mic that isn't the default is opened directly.
+    var deviceForRecording: AudioDeviceID? {
+        guard let chosen, chosen.id != systemDefault?.id else { return nil }
+        return chosen.id
+    }
 
     func refresh() {
         let ids = Self.allDeviceIDs().filter(Self.hasInput)

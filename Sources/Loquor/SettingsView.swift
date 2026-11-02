@@ -11,6 +11,7 @@ struct SettingsView: View {
     @ObservedObject var arabic: ArabicSupport
     @ObservedObject var microphones: Microphones
     @ObservedObject var dictation: DictationSettings
+    @ObservedObject var updates: UpdateChecker
     let keys: KeyMonitor
 
     // macOS doesn't announce permission changes, so poll while the window is open.
@@ -51,6 +52,7 @@ struct SettingsView: View {
 
             Form {
                 AboutSection(arabicDownloaded: arabic.isDownloaded)
+                UpdatesSection(updates: updates)
             }
             .formStyle(.grouped)
             .tabItem { Label("About", systemImage: "info.circle") }
@@ -431,6 +433,32 @@ private struct MicrophoneSection: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear { microphones.refresh() }
+    }
+}
+
+// MARK: - Updates
+
+private struct UpdatesSection: View {
+    @ObservedObject var updates: UpdateChecker
+
+    var body: some View {
+        Section {
+            Toggle("Check for updates automatically", isOn: $updates.automatic)
+            HStack {
+                Text(updates.lastResult ?? "Version \(updates.current)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if updates.available != nil {
+                    Button("Download Update…", action: updates.openDownload).controlSize(.small)
+                }
+                Button("Check Now") { updates.check(manual: true) }.controlSize(.small)
+            }
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text("Once a day Loquor asks GitHub for the latest release. Nothing about you or your Mac is sent.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

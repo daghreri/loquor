@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let log = KeyLog(name: "loquor.log")
 
     private let dictation = DictationSettings()
+    private let updates = UpdateChecker()
     /// Watches for silence while hands-free (a forgotten session finishes by itself).
     private var silenceTimer: Timer?
     /// Shorter than this is a slip of the finger, not speech.
@@ -144,6 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         shortcutWatch = shortcuts.$shortcut.sink { [weak self] shortcut in self?.keys.shortcut = shortcut }
         keys.start()
         loadModel()
+        updates.onLog = { [log] line in log.write(line) }
+        updates.start()
     }
 
     private func loadModel() {
@@ -356,6 +359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissions.refresh()
         menu.removeAllItems()
 
+        if let release = updates.available {
+            menu.addItem(item("Download Update: Loquor \(release.version)…", #selector(downloadUpdate)))
+            menu.addItem(.separator())
+        }
         let status = NSMenuItem(title: "Loquor: \(statusText)", action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
@@ -459,6 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissions.requestKeychain()
     }
     @objc private func retryModel() { loadModel() }
+    @objc private func downloadUpdate() { updates.openDownload() }
     @objc private func copyLast() {
         guard let lastText else { return }
         NSPasteboard.general.clearContents()
@@ -477,7 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, arabic: arabic, microphones: microphones, dictation: dictation, keys: keys)
+            let view = SettingsView(permissions: permissions, loginItem: loginItem, shortcuts: shortcuts, cleanup: cleanup, connectivity: connectivity, arabic: arabic, microphones: microphones, dictation: dictation, updates: updates, keys: keys)
             let host = NSHostingController(rootView: view)
             host.sizingOptions = [.preferredContentSize]  // window follows each tab's height
             let window = NSWindow(contentViewController: host)

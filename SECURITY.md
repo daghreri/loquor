@@ -17,6 +17,9 @@ Please report security problems privately through GitHub's
 - **The API key** is kept only in the login Keychain (not synced), read at most
   once per launch, and kept in memory while Loquor runs. It's never written to
   files, preferences or logs.
+- **Update check:** once a day (unless turned off in Settings › About), Loquor
+  asks `api.github.com` for the latest release. Nothing about the user or the Mac
+  is sent; installing an update stays manual.
 - **Settings** (shortcut, model, word list) are in
   `~/Library/Preferences/com.daghreri.loquor.plist`, not encrypted.
 - **Logs** in `~/Library/Logs/Loquor/` hold timings while the shortcut is in use

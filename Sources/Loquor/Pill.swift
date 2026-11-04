@@ -14,6 +14,11 @@ final class Pill {
         case message(String)  // a short notice, e.g. the model is still loading
     }
 
+    /// The language name shown while listening ("English" / "عربي"), or nil for none.
+    func setLanguage(_ label: String?) {
+        if model.language != label { model.language = label }
+    }
+
     /// Seconds left before hands-free stops on silence, or nil when not warning.
     func setSilenceLeft(_ seconds: Int?) {
         if model.silenceLeft != seconds { model.silenceLeft = seconds }
@@ -180,6 +185,7 @@ final class PillModel: ObservableObject {
 
     @Published var mode: Pill.Mode = .listening(handsFree: false)
     @Published var elapsed: TimeInterval = 0
+    @Published var language: String?
     var limit: TimeInterval = 60
     @Published var silenceLeft: Int?
     @Published private(set) var levels = [Float](repeating: 0, count: barCount)
@@ -204,6 +210,15 @@ private struct PillView: View {
             case .listening(let handsFree):
                 Circle().fill(.red).frame(width: 7, height: 7)
                 Waveform(levels: model.levels)
+                if let language = model.language {
+                    Text(language)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(.white.opacity(0.18)))
+                        .fixedSize()
+                }
                 Clock(elapsed: model.elapsed, limit: model.limit, silenceLeft: model.silenceLeft)
                 if handsFree {
                     Text("esc")
